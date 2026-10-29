@@ -7,11 +7,13 @@
     },
     "ml-service": {
       "root": "ml-service",
-      "framework": "fastapi"
+      "framework": "fastapi",
+      "entrypoint": "main:app"
     },
     "server": {
       "root": "server",
       "framework": "express",
+      "entrypoint": "server.js",
       "bindings": [
         {
           "type": "service",
