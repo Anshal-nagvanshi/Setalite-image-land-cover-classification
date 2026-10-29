@@ -23,7 +23,8 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const FASTAPI_ML_URL = process.env.FASTAPI_ML_URL || 'http://localhost:8000/predict';
+const FASTAPI_BASE_URL = process.env.FASTAPI_URL || process.env.FASTAPI_BASE_URL || 'http://localhost:8000';
+const FASTAPI_ML_URL = process.env.FASTAPI_ML_URL || `${FASTAPI_BASE_URL.replace(/\/$/, '')}/predict`;
 
 // Middleware
 app.use(cors());
@@ -615,7 +616,6 @@ app.get('/api/classifications', async (req, res) => {
 });
 
 // 2b. EuroSAT Datasets Proxy (cm93/eurosat & blanchon/EuroSAT_RGB)
-const FASTAPI_BASE_URL = process.env.FASTAPI_BASE_URL || 'http://localhost:8000';
 
 app.get('/api/datasets', async (req, res) => {
   try {
