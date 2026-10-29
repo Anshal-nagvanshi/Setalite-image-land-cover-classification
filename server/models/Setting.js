@@ -13,14 +13,22 @@ const SettingSchema = new mongoose.Schema({
     type: String,
     default: 'Min-Max Scaling [0, 1]'
   },
-  dataAugmentation: {
-    type: Boolean,
-    default: true
+  confidenceThreshold: {
+    type: Number,
+    default: 15
+  },
+  spectralBands: {
+    type: String,
+    default: 'RGB (Red-Green-Blue Optical)'
+  },
+  theme: {
+    type: String,
+    default: 'Dark Emerald'
   },
   profile: {
-    fullName: { type: String, default: 'Anshal Nagyanshi' },
-    username: { type: String, default: 'anshal_nagyanshi' },
-    email: { type: String, default: 'anshal@example.com' }
+    fullName: { type: String, default: '' },
+    username: { type: String, default: '' },
+    email: { type: String, default: '' }
   },
   updatedAt: {
     type: Date,

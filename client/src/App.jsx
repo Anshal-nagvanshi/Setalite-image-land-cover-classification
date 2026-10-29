@@ -184,19 +184,27 @@ export default function App() {
     }
   };
 
-  const fetchSettings = async () => {
+  const fetchSettings = async (user = currentUser) => {
     try {
-      const res = await fetch(`${API_BASE}/settings`);
+      const headers = {};
+      if (user) {
+        headers['x-user-id'] = user._id || user.id || user.username;
+      }
+      const res = await fetch(`${API_BASE}/settings`, { headers });
       if (res.ok) {
         const data = await res.json();
-        // Retain architecture & system settings, but only show profile if user is authenticated
+        // Retain architecture & system settings, and sync profile if user is authenticated
         setSettings((prev) => ({
+          ...prev,
           ...data,
-          profile: currentUser
+          confidenceThreshold: data.confidenceThreshold !== undefined ? data.confidenceThreshold : (prev.confidenceThreshold || 15),
+          spectralBands: data.spectralBands || prev.spectralBands || 'RGB (Red-Green-Blue Optical)',
+          theme: data.theme || prev.theme || 'Dark Emerald',
+          profile: user
             ? {
-                fullName: currentUser.fullName,
-                username: currentUser.username,
-                email: currentUser.email
+                fullName: data.profile?.fullName || user.fullName,
+                username: data.profile?.username || user.username,
+                email: data.profile?.email || user.email
               }
             : {
                 fullName: '',
@@ -544,31 +552,59 @@ export default function App() {
   const handleSaveSettings = async () => {
     setSavingSettings(true);
     try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (currentUser) {
+        headers['x-user-id'] = currentUser._id || currentUser.id || currentUser.username;
+      }
       await fetch(`${API_BASE}/settings`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(settings)
       });
-    } catch (e) {}
+      // Save locally as well so preferences persist even if working offline
+      localStorage.setItem('user_settings', JSON.stringify(settings));
+    } catch (e) {
+      console.warn('Settings save warning:', e);
+    }
     setTimeout(() => {
       setSavingSettings(false);
       showToast('System configurations updated.');
-    }, 700);
+    }, 400);
   };
 
   const handleUpdateProfile = async () => {
+    if (!currentUser) {
+      setAuthModalOpen(true);
+      return;
+    }
     setUpdatingProfile(true);
     try {
-      await fetch(`${API_BASE}/settings`, {
+      const headers = { 'Content-Type': 'application/json' };
+      headers['x-user-id'] = currentUser._id || currentUser.id || currentUser.username;
+      
+      const res = await fetch(`${API_BASE}/settings`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ profile: settings.profile })
       });
-    } catch (e) {}
+
+      if (res.ok) {
+        const updatedUser = {
+          ...currentUser,
+          fullName: settings.profile.fullName || currentUser.fullName,
+          username: settings.profile.username || currentUser.username,
+          email: settings.profile.email || currentUser.email
+        };
+        setCurrentUser(updatedUser);
+        localStorage.setItem('auth_user', JSON.stringify(updatedUser));
+      }
+    } catch (e) {
+      console.warn('Profile update warning:', e);
+    }
     setTimeout(() => {
       setUpdatingProfile(false);
       showToast('Profile updated successfully');
-    }, 700);
+    }, 400);
   };
 
   // Chart Setup - Clean formatting and full visibility of all class names
@@ -583,6 +619,8 @@ export default function App() {
         backgroundColor: displayedProbabilities.map((p, i) => {
           if (i === 0) return '#10b981'; // Winner: vibrant emerald
           if (i === 1) return '#0284c7'; // Runner-up: sky blue
+          const threshold = settings.confidenceThreshold !== undefined ? settings.confidenceThreshold : 15;
+          if (p.confidence >= threshold) return '#059669'; // Above user-configured threshold
           if (p.confidence > 5) return '#475569'; // Meaningful probability: slate
           return '#1e293b'; // Minor baseline probability
         }),
@@ -1511,6 +1549,38 @@ export default function App() {
                   </select>
                 </div>
 
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1.5">Spectral Band Processing</label>
+                  <select
+                    value={settings.spectralBands || 'RGB (Red-Green-Blue Optical)'}
+                    onChange={(e) => setSettings({ ...settings, spectralBands: e.target.value })}
+                    className="w-full bg-[#090d16] border border-slate-700 rounded-xl p-2.5 text-slate-200 focus:outline-none focus:border-emerald-500"
+                  >
+                    <option>RGB (Red-Green-Blue Optical)</option>
+                    <option>False Color Infrared (NIR-Red-Green)</option>
+                    <option>Multi-Spectral NDVI Vegetative Enhanced</option>
+                  </select>
+                </div>
+
+                <div>
+                  <div className="flex justify-between items-center mb-1.5">
+                    <label className="font-medium text-slate-300">Confidence Highlight Threshold</label>
+                    <span className="font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                      {settings.confidenceThreshold !== undefined ? settings.confidenceThreshold : 15}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="5"
+                    max="50"
+                    step="5"
+                    value={settings.confidenceThreshold !== undefined ? settings.confidenceThreshold : 15}
+                    onChange={(e) => setSettings({ ...settings, confidenceThreshold: Number(e.target.value) })}
+                    className="w-full accent-emerald-500 cursor-pointer"
+                  />
+                  <p className="text-[10px] text-slate-500 mt-1">Highlights classification bars in the distribution graph exceeding this probability.</p>
+                </div>
+
                 <div className="flex items-center justify-between pt-2 border-t border-slate-800">
                   <div>
                     <p className="font-medium text-slate-200">Data Augmentation during Inference</p>
@@ -1522,6 +1592,30 @@ export default function App() {
                     onChange={(e) => setSettings({ ...settings, dataAugmentation: e.target.checked })}
                     className="w-4 h-4 accent-emerald-500 rounded cursor-pointer"
                   />
+                </div>
+
+                <div className="flex items-center justify-between pt-2 border-t border-slate-800">
+                  <div>
+                    <p className="font-medium text-slate-200">Reset System Defaults</p>
+                    <p className="text-[11px] text-slate-500">Restore factory neural architecture and normalization values</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSettings(prev => ({
+                        ...prev,
+                        architecture: 'ResNet-50 (Pretrained on ImageNet / EuroSAT)',
+                        normalization: 'Min-Max Scaling [0, 1]',
+                        dataAugmentation: true,
+                        confidenceThreshold: 15,
+                        spectralBands: 'RGB (Red-Green-Blue Optical)'
+                      }));
+                      showToast('Default configurations restored. Click Save to persist.');
+                    }}
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg transition text-[11px]"
+                  >
+                    Reset Defaults
+                  </button>
                 </div>
 
                 <div className="pt-4">
@@ -1545,7 +1639,7 @@ export default function App() {
               <div className="flex items-center justify-between pb-6 border-b border-slate-800">
                 <div className="flex items-center space-x-4">
                   <div className="w-16 h-16 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 text-xl font-bold">
-                    AN
+                    {currentUser?.avatarInitials || (currentUser?.fullName || settings.profile?.fullName ? (currentUser?.fullName || settings.profile?.fullName).split(' ').map(n=>n[0]).join('').toUpperCase().slice(0, 2) : 'EO')}
                   </div>
                   <div>
                     <h2 className="text-base font-bold text-slate-100">{currentUser?.fullName || settings.profile?.fullName || 'Guest Researcher'}</h2>

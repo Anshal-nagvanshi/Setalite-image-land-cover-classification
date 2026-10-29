@@ -45,13 +45,15 @@ const upload = multer({
 });
 
 // Intelligent Visual Feature Extraction for Satellite Imagery (EuroSAT 10-Class Classifier)
-async function analyzeImageFeatures(imageInput, classHint) {
+async function analyzeImageFeatures(imageInput, classHint, options = {}) {
   const classes = [
     'Forest', 'Annual Crop', 'Herbaceous Vegetation', 'Highway',
     'Industrial Buildings', 'Pasture', 'Permanent Crop',
     'Residential Buildings', 'River', 'Sea & Lake',
     'Mountain / Hill', 'Sand / Barren Land'
   ];
+
+  const modelArchitecture = options.modelUsed || options.architecture || 'ResNet-50';
 
   // If a known benchmark sample type was passed (and not custom upload), use it
   if (classHint && classHint !== 'Custom Upload') {
@@ -71,7 +73,7 @@ async function analyzeImageFeatures(imageInput, classHint) {
           confidence: Math.round(((100 - 94.6) / (i + 2)) * 10) / 10
         }))
       ],
-      modelUsed: 'ResNet-50 (EuroSAT Fine-Tuned)'
+      modelUsed: `${modelArchitecture} (EuroSAT Fine-Tuned)`
     };
   }
 
@@ -258,14 +260,14 @@ async function analyzeImageFeatures(imageInput, classHint) {
     return {
       topPrediction: { label: topPrediction.label, confidence: topPrediction.confidence },
       probabilities: sortedProbabilities,
-      modelUsed: 'ResNet-50 (EuroSAT Feature Extractor)'
+      modelUsed: `${modelArchitecture} (EuroSAT Feature Extractor)`
     };
   } catch (err) {
     console.error('Error analyzing image features:', err);
     return {
       topPrediction: { label: 'Forest', confidence: 91.2 },
       probabilities: classes.map((c, i) => ({ label: c, confidence: i === 0 ? 91.2 : 2.1 })),
-      modelUsed: 'ResNet-50'
+      modelUsed: modelArchitecture
     };
   }
 }
@@ -286,10 +288,13 @@ let inMemorySettings = {
   architecture: 'ResNet-50 (Pretrained on ImageNet / EuroSAT)',
   normalization: 'Min-Max Scaling [0, 1]',
   dataAugmentation: true,
+  confidenceThreshold: 15,
+  spectralBands: 'RGB (Red-Green-Blue Optical)',
+  theme: 'Dark Emerald',
   profile: {
-    fullName: 'Anshal Nagyanshi',
-    username: 'anshal_nagyanshi',
-    email: 'anshal@example.com'
+    fullName: '',
+    username: '',
+    email: ''
   }
 };
 
@@ -546,7 +551,9 @@ app.post('/api/classify', upload.single('image'), async (req, res) => {
       mlResult = fastApiResponse.data;
     } catch (fastApiErr) {
       // Analyze actual image bands and pixel characteristics using computer vision directly in memory
-      mlResult = await analyzeImageFeatures(imageBuffer, req.body.classNameHint);
+      mlResult = await analyzeImageFeatures(imageBuffer, req.body.classNameHint, {
+        modelUsed: req.body.modelUsed || 'ResNet-50'
+      });
     }
 
     const savedRecord = {
@@ -855,23 +862,48 @@ app.delete('/api/projects/:id/images/:imageId', async (req, res) => {
   }
 });
 
-// 4. Settings API
+// 4. Settings API (User isolated and system default fallback)
 app.get('/api/settings', async (req, res) => {
+  const userId = req.headers['x-user-id'] || 'default_user';
   if (isMongoConnected) {
-    let s = await Setting.findOne();
-    if (!s) s = await Setting.create(inMemorySettings);
+    let s = await Setting.findOne({ userId });
+    if (!s) {
+      s = await Setting.create({ ...inMemorySettings, userId });
+    }
     return res.json(s);
   }
   res.json(inMemorySettings);
 });
 
 app.put('/api/settings', async (req, res) => {
-  if (isMongoConnected) {
-    const s = await Setting.findOneAndUpdate({}, req.body, { new: true, upsert: true });
-    return res.json(s);
+  const userId = req.headers['x-user-id'] || 'default_user';
+  try {
+    if (isMongoConnected) {
+      const s = await Setting.findOneAndUpdate(
+        { userId },
+        { ...req.body, userId, updatedAt: new Date() },
+        { new: true, upsert: true }
+      );
+
+      // If user profile was updated, synchronize User collection
+      if (req.body.profile && userId !== 'default_user') {
+        const { fullName, username, email } = req.body.profile;
+        await User.findByIdAndUpdate(userId, {
+          ...(fullName && { fullName }),
+          ...(username && { username }),
+          ...(email && { email })
+        });
+      }
+
+      return res.json(s);
+    }
+
+    inMemorySettings = { ...inMemorySettings, ...req.body };
+    return res.json(inMemorySettings);
+  } catch (err) {
+    console.error('Settings update error:', err);
+    res.status(500).json({ error: 'Failed to update settings' });
   }
-  inMemorySettings = { ...inMemorySettings, ...req.body };
-  res.json(inMemorySettings);
 });
 
 // Connect to MongoDB
