@@ -1,0 +1,8 @@
+# Heavy local python ML training environment and weights
+ml-service/
+ml-service/**
+
+# System and logs
+*.log
+.DS_Store
+Thumbs.db

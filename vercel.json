@@ -5,23 +5,10 @@
       "root": "client",
       "framework": "vite"
     },
-    "ml-service": {
-      "root": "ml-service",
-      "framework": "fastapi",
-      "entrypoint": "main:app"
-    },
     "server": {
       "root": "server",
       "framework": "express",
-      "entrypoint": "server.js",
-      "bindings": [
-        {
-          "type": "service",
-          "service": "ml-service",
-          "format": "url",
-          "env": "FASTAPI_URL"
-        }
-      ]
+      "entrypoint": "server.js"
     }
   },
   "rewrites": [
