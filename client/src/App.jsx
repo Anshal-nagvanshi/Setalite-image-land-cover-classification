@@ -92,6 +92,8 @@ export default function App() {
   const [selectedProject, setSelectedProject] = useState(null);
   const [uploadingProjectImages, setUploadingProjectImages] = useState(false);
   const [activeProjectDetail, setActiveProjectDetail] = useState(null);
+  const [saveToProjectModal, setSaveToProjectModal] = useState(false);
+  const [savingToProject, setSavingToProject] = useState(false);
   const projectFileInputRef = useRef(null);
 
   // Settings State
@@ -495,16 +497,73 @@ export default function App() {
     showToast('Project deleted successfully.');
   };
 
+  const resizeImageFile = (file) => {
+    return new Promise((resolve) => {
+      // If already small (< 400KB), don't bother resizing
+      if (file.size < 400 * 1024) {
+        return resolve(file);
+      }
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const maxDim = 800;
+          let w = img.width;
+          let h = img.height;
+          if (w > maxDim || h > maxDim) {
+            if (w > h) {
+              h = Math.round((h * maxDim) / w);
+              w = maxDim;
+            } else {
+              w = Math.round((w * maxDim) / h);
+              h = maxDim;
+            }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, w, h);
+          canvas.toBlob(
+            (blob) => {
+              if (blob) {
+                const resized = new File([blob], file.name.replace(/\.\w+$/, '.jpg'), { type: 'image/jpeg' });
+                resolve(resized);
+              } else {
+                resolve(file);
+              }
+            },
+            'image/jpeg',
+            0.82
+          );
+        };
+        img.onerror = () => resolve(file);
+        img.src = e.target.result;
+      };
+      reader.onerror = () => resolve(file);
+      reader.readAsDataURL(file);
+    });
+  };
+
   const handleUploadProjectImages = async (projId, files) => {
     if (!files || files.length === 0) return;
     setUploadingProjectImages(true);
+    showToast(`Preparing & analyzing ${files.length} satellite patch${files.length > 1 ? 'es' : ''}...`);
     try {
       const formData = new FormData();
       for (let i = 0; i < files.length; i++) {
-        formData.append('images', files[i]);
+        const processedFile = await resizeImageFile(files[i]);
+        formData.append('images', processedFile);
       }
+
+      const headers = {};
+      if (currentUser) {
+        headers['x-user-id'] = currentUser._id || currentUser.id || currentUser.username;
+      }
+
       const res = await fetch(`${API_BASE}/projects/${projId}/images`, {
         method: 'POST',
+        headers,
         body: formData
       });
       if (res.ok) {
@@ -516,12 +575,14 @@ export default function App() {
         if (selectedProject && selectedProject._id === updatedProject._id) {
           setSelectedProject(updatedProject);
         }
-        showToast(`Added and analyzed ${files.length} images!`);
+        showToast(`Successfully analyzed ${files.length} patch${files.length > 1 ? 'es' : ''} and updated graph!`);
       } else {
-        throw new Error('Upload failed');
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Upload failed');
       }
     } catch (err) {
-      showToast('Error uploading images to project.');
+      console.error('Project image upload error:', err);
+      showToast(err.message || 'Error uploading images to project.');
     } finally {
       setUploadingProjectImages(false);
       if (projectFileInputRef.current) projectFileInputRef.current.value = '';
@@ -546,6 +607,60 @@ export default function App() {
       }
     } catch (e) {
       showToast('Failed to delete image.');
+    }
+  };
+
+  const handleSavePatchToProject = async (targetProjId) => {
+    if (!results || !previewSrc) return;
+    if (!currentUser) {
+      setAuthModalOpen(true);
+      showToast('Please sign in to save patches into your projects.');
+      return;
+    }
+
+    setSavingToProject(true);
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      headers['x-user-id'] = currentUser._id || currentUser.id || currentUser.username;
+
+      const payload = {
+        images: [
+          {
+            name: `${patchMetadata.id || 'patch'}.jpg`,
+            imageUrl: previewSrc,
+            topPrediction: results.topPrediction,
+            probabilities: results.probabilities,
+            modelUsed: results.modelUsed || settings.architecture.split(' ')[0]
+          }
+        ]
+      };
+
+      const res = await fetch(`${API_BASE}/projects/${targetProjId}/images`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload)
+      });
+
+      if (res.ok) {
+        const updatedProject = await res.json();
+        setProjects(projects.map(p => p._id === updatedProject._id ? updatedProject : p));
+        if (activeProjectDetail && activeProjectDetail._id === updatedProject._id) {
+          setActiveProjectDetail(updatedProject);
+        }
+        if (selectedProject && selectedProject._id === updatedProject._id) {
+          setSelectedProject(updatedProject);
+        }
+        setSaveToProjectModal(false);
+        showToast(`Saved patch to "${updatedProject.name}" and updated project graph!`);
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to save patch');
+      }
+    } catch (err) {
+      console.error('Error saving patch to project:', err);
+      showToast(err.message || 'Error saving patch to project.');
+    } finally {
+      setSavingToProject(false);
     }
   };
 
@@ -1072,6 +1187,40 @@ export default function App() {
                         <p className="text-[10px] text-emerald-400 font-medium">98.7% Benchmark Acc</p>
                       </div>
                     </div>
+
+                    {/* Quick Save to Project Action */}
+                    <div className="flex items-center justify-between pt-2 border-t border-slate-800/80">
+                      <span className="text-xs text-slate-400">
+                        {selectedProject ? (
+                          <span>Current Workspace: <strong className="text-emerald-400">{selectedProject.name}</strong></span>
+                        ) : (
+                          <span>Organize into a project workspace:</span>
+                        )}
+                      </span>
+                      <button
+                        onClick={() => {
+                          if (selectedProject) {
+                            handleSavePatchToProject(selectedProject._id);
+                          } else {
+                            setSaveToProjectModal(true);
+                          }
+                        }}
+                        disabled={savingToProject}
+                        className="px-4 py-2 bg-emerald-600/20 hover:bg-emerald-600 border border-emerald-500/30 hover:border-emerald-500 text-emerald-300 hover:text-white rounded-xl text-xs font-semibold transition flex items-center gap-2 shadow"
+                      >
+                        {savingToProject ? (
+                          <>
+                            <i className="fa-solid fa-spinner animate-spin"></i>
+                            <span>Saving Patch...</span>
+                          </>
+                        ) : (
+                          <>
+                            <i className="fa-solid fa-folder-plus text-emerald-400"></i>
+                            <span>{selectedProject ? 'Save to Current Project' : 'Add to a Project'}</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -1328,6 +1477,20 @@ export default function App() {
                     });
                   });
 
+                  const standardClasses = [
+                    'Forest', 'Annual Crop', 'Herbaceous Vegetation', 'Highway',
+                    'Industrial Buildings', 'Pasture', 'Permanent Crop',
+                    'Residential Buildings', 'River', 'Sea & Lake',
+                    'Mountain / Hill', 'Sand / Barren Land'
+                  ];
+
+                  // Ensure every standard class has an entry so graph is never broken
+                  standardClasses.forEach((sc) => {
+                    if (classTotals[sc] === undefined) {
+                      classTotals[sc] = 0;
+                    }
+                  });
+
                   // Calculate average confidence for each class across all patches
                   const avgProbabilities = Object.keys(classTotals).map((label) => ({
                     label,
@@ -1444,7 +1607,11 @@ export default function App() {
 
                         {totalImages > 0 ? (
                           <div className="h-[380px] relative bg-[#090d16]/70 p-4 rounded-xl border border-slate-800/80">
-                            <Bar data={overallBarData} options={overallBarOptions} />
+                            <Bar
+                              key={`overall-bar-${activeProjectDetail._id}-${totalImages}-${Date.now()}`}
+                              data={overallBarData}
+                              options={overallBarOptions}
+                            />
                           </div>
                         ) : (
                           <div className="py-16 text-center bg-[#090d16]/40 rounded-xl border border-slate-800/50">
@@ -1855,6 +2022,78 @@ export default function App() {
                 className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-500 transition"
               >
                 Save Changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Save Patch to Project */}
+      {saveToProjectModal && (
+        <div className="fixed inset-0 z-50 bg-[#090d16]/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#0f172a] border border-slate-800 p-6 rounded-2xl w-full max-w-md shadow-2xl">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-base font-bold text-white">Save Patch to Project</h3>
+              <button
+                onClick={() => setSaveToProjectModal(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                <i className="fa-solid fa-xmark"></i>
+              </button>
+            </div>
+            <p className="text-xs text-slate-400 mb-4">
+              Select a project workspace to store this patch and include its spectral categorization into the project's cumulative land cover graph.
+            </p>
+
+            <div className="space-y-2 max-h-60 overflow-y-auto mb-4 pr-1 scrollbar-thin">
+              {projects.length === 0 ? (
+                <div className="text-center py-6 bg-[#090d16] rounded-xl border border-slate-800/80">
+                  <p className="text-xs text-slate-400 mb-2">You don't have any projects yet.</p>
+                  <button
+                    onClick={() => {
+                      setSaveToProjectModal(false);
+                      setNewProjectModal(true);
+                    }}
+                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded-lg font-medium"
+                  >
+                    <i className="fa-solid fa-plus mr-1"></i> Create a Project First
+                  </button>
+                </div>
+              ) : (
+                projects.map((proj) => (
+                  <button
+                    key={proj._id}
+                    onClick={() => handleSavePatchToProject(proj._id)}
+                    disabled={savingToProject}
+                    className="w-full text-left p-3 rounded-xl bg-[#090d16] border border-slate-800 hover:border-emerald-500/50 hover:bg-slate-800/40 transition flex items-center justify-between group"
+                  >
+                    <div>
+                      <h4 className="text-xs font-bold text-slate-200 group-hover:text-emerald-400">{proj.name}</h4>
+                      <p className="text-[10px] text-slate-500">{proj.images?.length || 0} patches • {proj.model || 'ResNet-50'}</p>
+                    </div>
+                    <span className="text-xs text-emerald-400 opacity-0 group-hover:opacity-100 transition flex items-center gap-1 font-semibold">
+                      Add <i className="fa-solid fa-arrow-right text-[10px]"></i>
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+
+            <div className="flex justify-between items-center pt-2 border-t border-slate-800">
+              <button
+                onClick={() => {
+                  setSaveToProjectModal(false);
+                  setNewProjectModal(true);
+                }}
+                className="text-xs text-emerald-400 hover:underline flex items-center gap-1 font-medium"
+              >
+                <i className="fa-solid fa-plus text-[10px]"></i> Create New Project
+              </button>
+              <button
+                onClick={() => setSaveToProjectModal(false)}
+                className="px-3.5 py-1.5 rounded-xl text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800 transition"
+              >
+                Cancel
               </button>
             </div>
           </div>

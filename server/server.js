@@ -832,29 +832,41 @@ app.post('/api/projects/:id/images', upload.array('images', 20), async (req, res
   const { id } = req.params;
   try {
     const uploadedFiles = req.files || [];
-    if (!uploadedFiles || uploadedFiles.length === 0) {
-      return res.status(400).json({ error: 'Please upload at least one satellite image patch.' });
+    const directImages = req.body.images || (req.body.image ? [req.body.image] : []);
+
+    if (uploadedFiles.length === 0 && directImages.length === 0) {
+      return res.status(400).json({ error: 'Please upload or provide at least one satellite image patch.' });
     }
 
     const processedImages = [];
+
+    // 1. Process multipart files
     for (const file of uploadedFiles) {
-      const buffer = file.buffer;
+      let buffer = file.buffer;
       const originalName = file.originalname || 'patch.jpg';
-      const mimeType = file.mimetype || 'image/jpeg';
-      const previewUrl = `data:${mimeType};base64,${buffer.toString('base64')}`;
+
+      // Compress and resize image to compact high-quality WebP/JPEG to prevent database bloat & avoid Vercel payload limits
+      try {
+        buffer = await sharp(buffer)
+          .resize(512, 512, { fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 80 })
+          .toBuffer();
+      } catch (sharpErr) {
+        // Fallback to original buffer
+      }
+
+      const previewUrl = `data:image/jpeg;base64,${buffer.toString('base64')}`;
 
       let mlResult;
-      // 1. Try FastAPI microservice
       try {
         const formData = new FormData();
-        formData.append('file', buffer, { filename: originalName, contentType: mimeType });
+        formData.append('file', buffer, { filename: originalName, contentType: 'image/jpeg' });
         const fastApiResponse = await axios.post(FASTAPI_ML_URL, formData, {
           headers: { ...formData.getHeaders() },
-          timeout: 6000
+          timeout: 5000
         });
         mlResult = fastApiResponse.data;
       } catch (e) {
-        // 2. Fallback to high-precision in-memory spectral band analyzer
         mlResult = await analyzeImageFeatures(buffer, req.body.classNameHint);
       }
 
@@ -863,32 +875,91 @@ app.post('/api/projects/:id/images', upload.array('images', 20), async (req, res
         name: originalName,
         imageUrl: previewUrl,
         topPrediction: {
-          className: mlResult.topPrediction.label || mlResult.topPrediction.className,
-          confidence: mlResult.topPrediction.confidence
+          className: mlResult.topPrediction.label || mlResult.topPrediction.className || 'Forest',
+          confidence: mlResult.topPrediction.confidence || 90
         },
         probabilities: mlResult.probabilities || [],
         createdAt: new Date()
       });
     }
 
+    // 2. Process JSON base64 / URL images
+    for (const imgItem of directImages) {
+      const imgDataUrl = typeof imgItem === 'string' ? imgItem : (imgItem.imageUrl || imgItem.url);
+      const imgName = (typeof imgItem === 'object' && imgItem.name) ? imgItem.name : 'patch.jpg';
+      let buffer;
+      if (imgDataUrl.startsWith('data:image/')) {
+        const base64Data = imgDataUrl.replace(/^data:image\/\w+;base64,/, '');
+        buffer = Buffer.from(base64Data, 'base64');
+      } else {
+        const imgRes = await axios.get(imgDataUrl, { responseType: 'arraybuffer', timeout: 6000 });
+        buffer = Buffer.from(imgRes.data);
+      }
+
+      // Compress
+      try {
+        buffer = await sharp(buffer)
+          .resize(512, 512, { fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 80 })
+          .toBuffer();
+      } catch (e) {}
+
+      const previewUrl = `data:image/jpeg;base64,${buffer.toString('base64')}`;
+
+      let mlResult;
+      // If probabilities were already supplied from a single dashboard inference, reuse them!
+      if (imgItem.probabilities && imgItem.topPrediction) {
+        mlResult = {
+          topPrediction: imgItem.topPrediction,
+          probabilities: imgItem.probabilities,
+          modelUsed: imgItem.modelUsed || 'ResNet-50'
+        };
+      } else {
+        mlResult = await analyzeImageFeatures(buffer, imgItem.classNameHint || req.body.classNameHint);
+      }
+
+      processedImages.push({
+        _id: 'img_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+        name: imgName,
+        imageUrl: previewUrl,
+        topPrediction: {
+          className: mlResult.topPrediction.label || mlResult.topPrediction.className || 'Forest',
+          confidence: mlResult.topPrediction.confidence || 90
+        },
+        probabilities: mlResult.probabilities || [],
+        createdAt: new Date()
+      });
+    }
+
+    // Save to MongoDB if connected
     if (isMongoConnected) {
-      const project = await Project.findById(id);
-      if (!project) return res.status(404).json({ error: 'Project not found' });
-      if (!project.images) project.images = [];
-      project.images.push(...processedImages);
-      await project.save();
-      return res.status(201).json(project);
+      let project = null;
+      if (mongoose.Types.ObjectId.isValid(id)) {
+        project = await Project.findById(id);
+      }
+      if (!project) {
+        project = await Project.findOne({ _id: id });
+      }
+      if (project) {
+        if (!project.images) project.images = [];
+        project.images.push(...processedImages);
+        await project.save();
+        return res.status(201).json(project);
+      }
     }
 
     // In-memory fallback
-    const projIdx = inMemoryProjects.findIndex(p => p._id === id);
-    if (projIdx === -1) return res.status(404).json({ error: 'Project not found' });
-    if (!inMemoryProjects[projIdx].images) inMemoryProjects[projIdx].images = [];
-    inMemoryProjects[projIdx].images.push(...processedImages);
-    return res.status(201).json(inMemoryProjects[projIdx]);
+    const projIdx = inMemoryProjects.findIndex(p => String(p._id) === String(id));
+    if (projIdx !== -1) {
+      if (!inMemoryProjects[projIdx].images) inMemoryProjects[projIdx].images = [];
+      inMemoryProjects[projIdx].images.push(...processedImages);
+      return res.status(201).json(inMemoryProjects[projIdx]);
+    }
+
+    res.status(404).json({ error: 'Project not found' });
   } catch (err) {
     console.error('Error adding project images:', err);
-    res.status(500).json({ error: 'Failed to process and add images to project' });
+    res.status(500).json({ error: 'Failed to process and add images to project: ' + err.message });
   }
 });
 
@@ -897,19 +968,28 @@ app.delete('/api/projects/:id/images/:imageId', async (req, res) => {
   const { id, imageId } = req.params;
   try {
     if (isMongoConnected) {
-      const project = await Project.findById(id);
-      if (!project) return res.status(404).json({ error: 'Project not found' });
-      project.images = project.images.filter(img => String(img._id) !== String(imageId));
-      await project.save();
-      return res.json(project);
+      let project = null;
+      if (mongoose.Types.ObjectId.isValid(id)) {
+        project = await Project.findById(id);
+      }
+      if (!project) {
+        project = await Project.findOne({ _id: id });
+      }
+      if (project) {
+        project.images = (project.images || []).filter(img => String(img._id) !== String(imageId));
+        await project.save();
+        return res.json(project);
+      }
     }
 
-    const projIdx = inMemoryProjects.findIndex(p => p._id === id);
-    if (projIdx === -1) return res.status(404).json({ error: 'Project not found' });
-    inMemoryProjects[projIdx].images = (inMemoryProjects[projIdx].images || []).filter(
-      img => String(img._id) !== String(imageId)
-    );
-    return res.json(inMemoryProjects[projIdx]);
+    const projIdx = inMemoryProjects.findIndex(p => String(p._id) === String(id));
+    if (projIdx !== -1) {
+      inMemoryProjects[projIdx].images = (inMemoryProjects[projIdx].images || []).filter(
+        img => String(img._id) !== String(imageId)
+      );
+      return res.json(inMemoryProjects[projIdx]);
+    }
+    res.status(404).json({ error: 'Project not found' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to remove image from project' });
   }
