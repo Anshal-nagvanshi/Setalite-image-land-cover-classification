@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+*/node_modules/
+__pycache__/
+*/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+.next/
+out/
+
+# Environment variables & local configs
+.env
+.env.local
+.env.*.local
+*.env
+
+# Temporary and upload directories
+server/uploads/*
+!server/uploads/.gitkeep
+tmp/
+temp/
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE configs
+.vscode/
+.idea/
